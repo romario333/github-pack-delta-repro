@@ -1,46 +1,35 @@
 # GitHub pack delta repro
 
-Small edits pushed to many similar, large files come back from GitHub as large cross-file deltas. A fresh clone gets a pack about 3.5x larger than the same history after a local `git repack -a -d -f`.
+Small edits to many similar multi-MB files, pushed one commit per push, come back from GitHub as large cross-file deltas. A fresh clone gets a pack about 3x larger than the same history after a local `git repack -a -d -f`.
 
-Found while investigating why a full clone of [openclaw/openclaw](https://github.com/openclaw/openclaw) is 6.2 GB when a local repack brings it to 1.2 GB. There, a bot commits 20 locale translation-memory files (2-4 MB of JSONL each) several times a day, changing a line or two per file.
+Found while investigating why a full clone of [openclaw/openclaw](https://github.com/openclaw/openclaw) is 6.2 GB when a local repack brings it to 1.2 GB. There, a bot pushes changes to 20 locale translation-memory files (2-4 MB of JSONL each) several times a day, changing a line or two per file.
 
-## What the script does
+## Run it
 
-`repro.py` needs only `git` and Python 3.
-
-1. Generates N synthetic JSONL files that share keys and English text but have different "translations". Each file is sorted by a per-file hash, like the original locale files.
-2. Pushes an initial commit to a new branch.
-3. Pushes a series of commits. Each one updates one line's timestamp and inserts one new line in every file.
-4. For each push, rebuilds the pack `git push` sends (`pack-objects --revs --thin`) and records how the new blobs are deltified.
-5. Fresh-clones the branch and records how GitHub serves the same blobs.
-6. Repacks the clone locally with `git repack -a -d -f` and records the result.
+`repro.sh` needs bash, awk, sort and git. Point it at an empty GitHub repository you can push to:
 
 ```
-python3 repro.py git@github.com:<you>/<empty-repo>.git            # 20 files x 8000 lines, 30 commits
-python3 repro.py <url> --files 20 --lines 8000 --commits 10 --branch my-run
+./repro.sh git@github.com:<you>/<empty-repo>.git [branch] [files=20] [lines=8000] [commits=30] [push=each|once]
 ```
 
-A default run takes about 5 minutes and pushes about 50 MB.
+It generates similar JSONL files (shared keys, English text and text hashes; per-file translations, cache keys and line order), commits and pushes them, then makes commits that each change one line and insert one line in every file. With `push=each` every commit is its own `git push`. With `push=once` all commits go in one push. Finally it fresh-clones the branch, counts blobs stored as deltas against a different file, repacks locally and counts again.
+
+A default run takes about 4 minutes and pushes about 45 MB.
 
 ## Results
 
-Runs from 2026-09-27, git 2.50.1 on macOS, pushing over SSH to a private repository.
+Runs from 2026-09-27, git 2.50.1 on macOS, pushing over SSH. 20 files x 8000 lines (about 2.2 MB each), 30 commits:
 
-Default run, 20 files x 8000 lines (about 2.5 MB each), 30 commits, 600 new blobs:
-
-| | same-file deltas | cross-file deltas | clone pack size |
+| | cross-file deltas in GitHub's pack | GitHub's pack | after local `repack -a -d -f` |
 |---|---|---|---|
-| Client push packs | 600 (0.19 MB) | 0 | |
-| GitHub fresh clone | 464 (0.13 MB) | 133 (82.8 MB) | 93.2 MiB |
-| After local `repack -a -d -f` | 576 (0.08 MB) | 0 | 26.2 MiB |
+| `push=each` (30 pushes) | 87 (56.6 MB) | 82.4 MiB | 28.4 MiB, 0 cross-file deltas |
+| `push=once` (1 push) | 18 (11.7 MB) | 16.0 MiB | 28.3 MiB, 0 cross-file deltas |
 
-An earlier identical run gave 141 cross-file deltas (87.8 MB) and a 87.3 MiB pack.
+Same commits, same data. The blowup only appears when the history arrives in many pushes.
 
-Every blob the client pushed was a delta of a few hundred bytes against the previous version of the same file. In the pack GitHub serves, about a quarter of them are instead deltas against another file, around 600 KB each.
+An earlier Python version of this repro (`repro.py` in this repository's git history) also rebuilt the pack each `git push` sends, using `pack-objects --revs --thin`. The client sent every changed file as a delta of a few hundred bytes against the previous version of the same file, with no cross-file deltas. That version pushed once per commit and varied the sizes:
 
-Other sizes:
-
-| files x lines | commits | cross-file deltas served | served vs repacked pack | reproduced |
+| files x lines | pushes | cross-file deltas served | served vs repacked pack | reproduced |
 |---|---|---|---|---|
 | 20 x 8000 | 30 | 133-141 | 87-93 vs 26 MiB | yes |
 | 20 x 8000 | 10 | 30 | 20.1 vs 16.8 MiB | yes |
@@ -51,10 +40,8 @@ Other sizes:
 | 5 x 8000 | 30 | 0 | 3.5 vs 5.5 MiB | no |
 | 2 x 8000 | 30 | 0 | 1.7 vs 4.4 MiB | no |
 
-The effect needs many similar files, files of a few MB, and enough pushes. It grows with the number of pushes. Every clone was taken within minutes of the last push.
-
-A local `repack -f` also produces a few cross-file deltas, usually about one per file. Git's delta window only looks at objects sorted before the current one, so the newest version of each file is compared against the previous file's versions. That is expected Git behavior and doesn't explain the counts above.
+The effect needs many similar files, files of a few MB, and many pushes. Every clone was taken within minutes of the last push.
 
 ## Open question
 
-The client sends good deltas, and a local repack produces good deltas. Something between receiving the push and serving the clone replaces some of them with cross-file deltas. This repo can't show whether that is GitHub's storage maintenance or the pack generation for the clone.
+The client sends good deltas, and a local repack produces good deltas. Something on GitHub's side between receiving many pushes and serving a clone replaces some of them with cross-file deltas. This repo can't show whether that is storage maintenance triggered by the pushes or how the pack for the clone is generated.
